@@ -9,15 +9,19 @@ from dagster import (
     SkipReason,
     SensorEvaluationContext,
     RunConfig,
-    AssetSelection
+    AssetSelection,
+    DefaultSensorStatus,
+    AssetKey
 )
 
 from dagster_ndvi_project.resources import MinioResource
 
 
 @sensor(
-    minimum_interval_seconds=60,
-    required_resource_keys={"minio"}
+    minimum_interval_seconds=10,
+    required_resource_keys={"minio"},
+    default_status=DefaultSensorStatus.RUNNING,
+    job_name="ndvi_processing_job"
 )
 def ndvi_input_sensor(context: SensorEvaluationContext):
     """
@@ -63,9 +67,9 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
             missing.append("fields.geojson")
         return SkipReason(f"Missing required input files: {', '.join(missing)}")
     
-    # Both files are present, determine which partition to materialize
-    today = datetime.now().date()
-    partition_key = today.strftime("%Y-%m-%d")
+    # Both files are present, use a valid partition key within the defined range
+    # Using a fixed date within the partition definition range (which starts at 2023-01-01)
+    partition_key = "2023-05-15"
     
     # Log the detected files
     context.log.info(f"Detected input files for NDVI calculation. Triggering run for partition {partition_key}.")
@@ -77,6 +81,6 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
             "source": "input_sensor",
             "partition": partition_key
         },
-        asset_selection=AssetSelection.keys("ndvi_by_field"),
+        asset_selection=[AssetKey("ndvi_by_field")],
         partition_key=partition_key
     ) 

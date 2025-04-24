@@ -99,6 +99,78 @@ data:
       config:
         job_namespace: ${NAMESPACE}
         image_pull_policy: Never
+        instance_config_map: dagster-instance-yaml
+        service_account_name: default
+        job_image: dagster-ndvi:latest
+        run_k8s_config:
+          container_config:
+            volume_mounts:
+              - name: dagster-home
+                mountPath: /opt/dagster/dagster_home
+              - name: dagster-instance
+                mountPath: /opt/dagster/dagster_home/dagster.yaml
+                subPath: dagster.yaml
+            env:
+              - name: MINIO_ENDPOINT_URL
+                valueFrom:
+                  configMapKeyRef:
+                    name: dagster-config
+                    key: MINIO_ENDPOINT_URL
+              - name: MINIO_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: dagster-secrets
+                    key: MINIO_ACCESS_KEY
+              - name: MINIO_SECRET_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: dagster-secrets
+                    key: MINIO_SECRET_KEY
+              - name: MINIO_BUCKET_NAME
+                valueFrom:
+                  configMapKeyRef:
+                    name: dagster-config
+                    key: MINIO_BUCKET_NAME
+          pod_template_spec_metadata:
+            labels:
+              app: dagster-run
+          pod_spec_config:
+            volumes:
+              - name: dagster-home
+                emptyDir: {}
+              - name: dagster-instance
+                configMap:
+                  name: dagster-instance-yaml
+EOF
+
+echo "--- Creating RBAC for Dagster ---"
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dagster-job-role
+  namespace: ${NAMESPACE}
+rules:
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "watch", "list", "create", "delete", "patch"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dagster-job-binding
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: Role
+  name: dagster-job-role
+  apiGroup: rbac.authorization.k8s.io
 EOF
 
 echo "--- Deploying Dagster Code Server ---"
