@@ -111,7 +111,7 @@ def calculate_ndvi(red_band: np.ndarray, nir_band: np.ndarray) -> np.ndarray:
 
 
 # Define the daily partitions
-daily_partitions = DailyPartitionsDefinition(start_date="2023-01-01")
+daily_partitions = DailyPartitionsDefinition(start_date="2023-01-01", end_date="2025-04-24")
 
 
 @asset(
@@ -124,6 +124,7 @@ def ndvi_by_field(context: AssetExecutionContext) -> Dict:
     Asset that calculates NDVI for each field within a bounding box.
     Requires two input GeoJSON files in the MinIO bucket: bounding_box.geojson and fields.geojson.
     The output is a dictionary with field IDs as keys and NDVI values as values.
+    When run with a field_id tag, processes only that specific field.
     """
     # Get partition date
     partition_date_str = context.partition_key
@@ -131,6 +132,13 @@ def ndvi_by_field(context: AssetExecutionContext) -> Dict:
     
     # Parse the partition date
     partition_date = datetime.strptime(partition_date_str, "%Y-%m-%d")
+    
+    # Check if we're processing a specific field
+    specific_field_id = context.get_tag("field_id")
+    if specific_field_id:
+        context.log.info(f"Processing specific field: {specific_field_id}")
+    else:
+        context.log.info("Processing all fields")
     
     # Get MinIO resource
     minio = context.resources.minio
@@ -141,7 +149,11 @@ def ndvi_by_field(context: AssetExecutionContext) -> Dict:
     previous_ndvi_by_field = {}
     previous_date = partition_date - timedelta(days=1)
     previous_date_str = previous_date.strftime("%Y-%m-%d")
-    previous_data_key = f"output_data/{previous_date_str}/ndvi_results.json"
+    
+    if specific_field_id:
+        previous_data_key = f"output_data/{specific_field_id}/{previous_date_str}/ndvi_results.json"
+    else:
+        previous_data_key = f"output_data/{previous_date_str}/ndvi_results.json"
     
     try:
         previous_data_response = s3_client.get_object(Bucket=bucket_name, Key=previous_data_key)
@@ -211,6 +223,13 @@ def ndvi_by_field(context: AssetExecutionContext) -> Dict:
     # Convert planting date strings to datetime
     fields_gdf['planting_date'] = pd.to_datetime(fields_gdf['planting_date'])
     
+    # Filter for specific field if specified
+    if specific_field_id:
+        fields_gdf = fields_gdf[fields_gdf['field_id'] == specific_field_id]
+        if fields_gdf.empty:
+            context.log.error(f"Field ID {specific_field_id} not found in fields GeoJSON.")
+            return {}
+    
     # Get all valid fields (fields whose planting date is on or before the partition date)
     valid_fields = fields_gdf[fields_gdf['planting_date'] <= pd.to_datetime(partition_date_str)]
     
@@ -234,140 +253,122 @@ def ndvi_by_field(context: AssetExecutionContext) -> Dict:
     # Store NDVI values for each field
     ndvi_results = {}
     
-    # Create a temporary NDVI file to use with rasterio
-    with tempfile.NamedTemporaryFile(suffix='.tif') as tmp_ndvi:
-        # Create a basic profile from red band (assuming the same dimensions)
-        profile = {
-            'driver': 'GTiff',
-            'height': ndvi.shape[0],
-            'width': ndvi.shape[1],
-            'count': 1,
-            'dtype': ndvi.dtype,
-            'crs': '+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs',  # Example CRS, adjust as needed
-            'transform': rasterio.transform.from_bounds(
-                *bbox_geom.bounds, ndvi.shape[1], ndvi.shape[0]
-            )
-        }
+    # Process NDVI for each field
+    for idx, field in valid_fields.iterrows():
+        field_id = field['field_id']
+        field_geom = field.geometry
         
-        # Write NDVI to the temporary file
-        with rasterio.open(tmp_ndvi.name, 'w', **profile) as dst:
-            dst.write(ndvi, 1)
-        
-        # For each valid field, calculate the mean NDVI
-        for idx, field in valid_fields.iterrows():
-            field_id = field['field_id']
-            field_geom = field['geometry']
+        # Create a temporary NDVI file to use with rasterio
+        with tempfile.NamedTemporaryFile(suffix='.tif') as tmp_ndvi:
+            # Create a basic profile from red band (assuming the same dimensions)
+            profile = {
+                'driver': 'GTiff',
+                'height': ndvi.shape[0],
+                'width': ndvi.shape[1],
+                'count': 1,
+                'dtype': ndvi.dtype,
+                'crs': '+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs',  # Example CRS, adjust as needed
+                'transform': rasterio.transform.from_bounds(
+                    *bbox_geom.bounds, ndvi.shape[1], ndvi.shape[0]
+                )
+            }
             
-            # Use the field geometry to mask the NDVI raster
+            # Write NDVI to temporary file
+            with rasterio.open(tmp_ndvi.name, 'w', **profile) as dst:
+                dst.write(ndvi, 1)
+            
+            # Read the file back to mask with the field geometry
             with rasterio.open(tmp_ndvi.name) as src:
-                out_image, out_transform = mask(src, [field_geom], crop=True)
-            
-            # Calculate mean NDVI for this field
-            field_ndvi = float(np.nanmean(out_image))
-            
-            # Store the result
-            ndvi_results[field_id] = field_ndvi
-            context.log.info(f"Field {field_id}: Mean NDVI = {field_ndvi:.4f}")
+                try:
+                    # Convert field geometry to the same CRS as the NDVI raster if needed
+                    field_geom_mask = [field_geom.__geo_interface__]
+                    # Mask the NDVI raster with the field geometry
+                    field_ndvi, _ = mask(src, field_geom_mask, crop=True, all_touched=True)
+                    
+                    # Calculate field statistics
+                    field_ndvi_data = field_ndvi[0]
+                    field_ndvi_mean = float(np.nanmean(field_ndvi_data))
+                    field_ndvi_min = float(np.nanmin(field_ndvi_data))
+                    field_ndvi_max = float(np.nanmax(field_ndvi_data))
+                    
+                    # Store in results
+                    ndvi_results[field_id] = {
+                        'date': partition_date_str,
+                        'mean_ndvi': field_ndvi_mean,
+                        'min_ndvi': field_ndvi_min,
+                        'max_ndvi': field_ndvi_max,
+                        'crop_type': field['crop_type'] if 'crop_type' in field else 'unknown',
+                        'planting_date': field['planting_date'].strftime('%Y-%m-%d')
+                    }
+                    
+                    # Generate a simple NDVI plot
+                    plt.figure(figsize=(8, 6))
+                    plt.imshow(field_ndvi[0], cmap='RdYlGn', vmin=-1, vmax=1)
+                    plt.colorbar(label='NDVI')
+                    plt.title(f"NDVI for Field {field_id} on {partition_date_str}")
+                    
+                    # Save the plot to a BytesIO object
+                    plot_buffer = io.BytesIO()
+                    plt.savefig(plot_buffer, format='png')
+                    plot_buffer.seek(0)
+                    plt.close()
+                    
+                    # Save to field-specific S3 directory
+                    field_dir = f"output_data/{field_id}/{partition_date_str}"
+                    
+                    # Upload plot to S3
+                    plot_key = f"{field_dir}/ndvi_plot.png"
+                    s3_client.put_object(
+                        Bucket=bucket_name,
+                        Key=plot_key,
+                        Body=plot_buffer,
+                        ContentType='image/png'
+                    )
+                    
+                    # Save per-field result as JSON
+                    field_result_key = f"{field_dir}/ndvi_results.json"
+                    field_result = {field_id: ndvi_results[field_id]}
+                    s3_client.put_object(
+                        Bucket=bucket_name,
+                        Key=field_result_key,
+                        Body=json.dumps(field_result, indent=2),
+                        ContentType='application/json'
+                    )
+                    
+                    context.log.info(f"Processed field {field_id} with mean NDVI: {field_ndvi_mean:.4f}")
+                    
+                except Exception as e:
+                    context.log.error(f"Error processing field {field_id}: {str(e)}")
+                    # Add error information to results
+                    ndvi_results[field_id] = {
+                        'date': partition_date_str,
+                        'error': str(e)
+                    }
     
-    # Move the input files to the processed_data folder
-    new_bbox_key = input_prefix + "processed_data/" + os.path.basename(bbox_key)
-    new_fields_key = input_prefix + "processed_data/" + os.path.basename(fields_key)
+    # Save combined results to S3/MinIO
+    if specific_field_id:
+        output_key = f"output_data/{specific_field_id}/{partition_date_str}/ndvi_results.json"
+    else:
+        output_key = f"output_data/{partition_date_str}/ndvi_results.json"
     
-    # Copy objects to processed_data folder
-    s3_client.copy_object(
-        Bucket=bucket_name,
-        CopySource={'Bucket': bucket_name, 'Key': bbox_key},
-        Key=new_bbox_key
-    )
-    s3_client.copy_object(
-        Bucket=bucket_name,
-        CopySource={'Bucket': bucket_name, 'Key': fields_key},
-        Key=new_fields_key
-    )
-    
-    # Delete original files after copying
-    s3_client.delete_object(Bucket=bucket_name, Key=bbox_key)
-    s3_client.delete_object(Bucket=bucket_name, Key=fields_key)
-    
-    context.log.info(f"Moved input files to processed_data folder.")
-    
-    # Create a visualization of the results
-    if ndvi_results:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Extract field IDs and NDVI values for plotting
-        field_ids = list(ndvi_results.keys())
-        ndvi_values = list(ndvi_results.values())
-        
-        # Sort by field ID
-        sorted_idx = np.argsort(field_ids)
-        sorted_field_ids = [field_ids[i] for i in sorted_idx]
-        sorted_ndvi_values = [ndvi_values[i] for i in sorted_idx]
-        
-        # Bar chart of NDVI values by field
-        bars = ax.bar(sorted_field_ids, sorted_ndvi_values)
-        
-        # Add previous day's values as reference points if available
-        if previous_ndvi_by_field:
-            prev_values = []
-            for field_id in sorted_field_ids:
-                if field_id in previous_ndvi_by_field:
-                    prev_values.append(previous_ndvi_by_field[field_id])
-                else:
-                    prev_values.append(None)
-            
-            # Only add scatter points where we have values
-            valid_indexes = [i for i, v in enumerate(prev_values) if v is not None]
-            if valid_indexes:
-                valid_fields = [sorted_field_ids[i] for i in valid_indexes]
-                valid_prev_values = [prev_values[i] for i in valid_indexes]
-                ax.scatter(valid_fields, valid_prev_values, color='red', marker='o', label=f'Previous ({(partition_date - timedelta(days=1)).strftime("%Y-%m-%d")})')
-                ax.legend()
-        
-        # Formatting
-        ax.set_xlabel('Field ID')
-        ax.set_ylabel('NDVI')
-        ax.set_title(f'Mean NDVI by Field - {partition_date_str}')
-        ax.grid(True, linestyle='--', alpha=0.7)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        # Save the plot to a BytesIO object
-        plot_buffer = io.BytesIO()
-        plt.savefig(plot_buffer, format='png')
-        plot_buffer.seek(0)
-        
-        # Upload the visualization to the output folder
-        viz_key = f"output_data/{partition_date_str}/ndvi_visualization.png"
-        s3_client.upload_fileobj(
-            plot_buffer, 
-            bucket_name, 
-            viz_key,
-            ExtraArgs={'ContentType': 'image/png'}
-        )
-        
-        context.log.info(f"Uploaded visualization to {viz_key}")
-        plt.close()
-    
-    # Save the NDVI results to S3 for future reference
-    results_key = f"output_data/{partition_date_str}/ndvi_results.json"
     s3_client.put_object(
         Bucket=bucket_name,
-        Key=results_key,
-        Body=json.dumps(ndvi_results),
+        Key=output_key,
+        Body=json.dumps(ndvi_results, indent=2),
         ContentType='application/json'
     )
     
-    context.log.info(f"Saved NDVI results to {results_key}")
+    # Add metadata to asset
+    metadata = {
+        "date": MetadataValue.text(partition_date_str),
+        "num_fields_processed": MetadataValue.int(len(ndvi_results)),
+        "fields": MetadataValue.json([f for f in ndvi_results.keys()]),
+    }
     
-    # Log metadata about the result
-    context.add_output_metadata({
-        "num_fields": len(ndvi_results),
-        "field_ids": MetadataValue.json(list(ndvi_results.keys())),
-        "min_ndvi": min(ndvi_results.values()) if ndvi_results else None,
-        "max_ndvi": max(ndvi_results.values()) if ndvi_results else None,
-        "date": partition_date_str,
-    })
+    if specific_field_id:
+        metadata["field_id"] = MetadataValue.text(specific_field_id)
     
-    # Return the results
-    return ndvi_results 
+    return Output(
+        value=ndvi_results,
+        metadata=metadata
+    ) 

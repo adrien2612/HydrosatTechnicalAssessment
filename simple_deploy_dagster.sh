@@ -92,6 +92,9 @@ data:
     run_coordinator:
       module: dagster.core.run_coordinator
       class: QueuedRunCoordinator
+      config:
+        max_concurrent_runs: 3
+        dequeue_interval_seconds: 30
     
     run_launcher:
       module: dagster_k8s.launcher
@@ -104,6 +107,13 @@ data:
         job_image: dagster-ndvi:latest
         run_k8s_config:
           container_config:
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
             volume_mounts:
               - name: dagster-home
                 mountPath: /opt/dagster/dagster_home
@@ -200,6 +210,10 @@ spec:
         env:
         - name: DAGSTER_HOME
           value: "/opt/dagster/dagster_home"
+        - name: DAGSTER_GRPC_STARTUP_TIMEOUT
+          value: "120"  # Increased timeout for GRPC startup
+        - name: PYTHONUNBUFFERED
+          value: "1"    # Ensure Python output is unbuffered for better logs
         envFrom:
         - configMapRef:
             name: dagster-config
@@ -210,11 +224,17 @@ spec:
           mountPath: /opt/dagster/dagster_home
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
+            memory: "1.5Gi"
             cpu: "500m"
+          limits:
+            memory: "2.5Gi"
+            cpu: "1000m"
+        readinessProbe:
+          tcpSocket:
+            port: 4000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 5
       volumes:
       - name: dagster-home
         emptyDir: {}
@@ -257,6 +277,8 @@ spec:
         env:
         - name: DAGSTER_HOME
           value: "/opt/dagster/dagster_home"
+        - name: PYTHONUNBUFFERED
+          value: "1"
         envFrom:
         - configMapRef:
             name: dagster-config
@@ -270,11 +292,19 @@ spec:
           subPath: dagster.yaml
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
+            memory: "1.5Gi"
             cpu: "500m"
+          limits:
+            memory: "2.5Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - ps -ef | grep "dagster-daemon run" | grep -v grep
+          initialDelaySeconds: 60
+          periodSeconds: 20
       volumes:
       - name: dagster-home
         emptyDir: {}
@@ -311,6 +341,10 @@ spec:
         env:
         - name: DAGSTER_HOME
           value: "/opt/dagster/dagster_home"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: DAGSTER_WEBSERVER_TIMEOUT
+          value: "60"
         envFrom:
         - configMapRef:
             name: dagster-config
@@ -327,11 +361,24 @@ spec:
           subPath: workspace.yaml
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
+            memory: "1.5Gi"
             cpu: "500m"
+          limits:
+            memory: "2.5Gi"
+            cpu: "1000m"
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          failureThreshold: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
       volumes:
       - name: dagster-home
         emptyDir: {}
@@ -364,13 +411,50 @@ echo "--- Waiting for all pods to be ready ---"
 sleep 5  # Give time for old pods to terminate
 kubectl -n $NAMESPACE wait --for=condition=Ready pods --all --timeout=300s || true
 
-echo "--- Starting port forwarding in the background ---"
-kubectl port-forward -n $NAMESPACE svc/dagster-webserver 8080:3000 &
-PORT_FORWARD_PID=$!
+echo "--- Waiting an additional 30 seconds for services to initialize properly ---"
+sleep 30
 
-echo "--- Deployment Complete! ---"
-echo "You can access the Dagster UI at: http://localhost:8080"
-echo "To check pod status, run: kubectl get pods -n ${NAMESPACE}"
-echo ""
-echo "Port forwarding is running in the background (PID: $PORT_FORWARD_PID)"
-echo "To stop port forwarding: kill $PORT_FORWARD_PID" 
+echo "--- Starting port forwarding with retry mechanism ---"
+PORT_FORWARD_SUCCESS=false
+PORT_FORWARD_PID=""
+MAX_RETRIES=5
+RETRY_COUNT=0
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$PORT_FORWARD_SUCCESS" = false ]; do
+  RETRY_COUNT=$((RETRY_COUNT+1))
+  echo "Attempt $RETRY_COUNT of $MAX_RETRIES to start port forwarding..."
+  
+  # Check if webserver pod is ready first
+  if kubectl -n $NAMESPACE get pods -l app=dagster-webserver | grep -q "Running"; then
+    kubectl port-forward -n $NAMESPACE svc/dagster-webserver 8080:3000 &
+    PORT_FORWARD_PID=$!
+    
+    # Give port forwarding a moment to establish
+    sleep 5
+    
+    # Check if port forwarding is working
+    if ps -p $PORT_FORWARD_PID > /dev/null && curl -s http://localhost:8080 > /dev/null; then
+      PORT_FORWARD_SUCCESS=true
+      echo "Port forwarding successfully established!"
+    else
+      echo "Port forwarding failed. Killing process and retrying..."
+      kill $PORT_FORWARD_PID 2>/dev/null || true
+      sleep 10
+    fi
+  else
+    echo "Webserver pod not yet in Running state. Waiting before retry..."
+    sleep 15
+  fi
+done
+
+if [ "$PORT_FORWARD_SUCCESS" = false ]; then
+  echo "WARNING: Automatic port forwarding failed after $MAX_RETRIES attempts."
+  echo "You may need to manually run: kubectl port-forward -n $NAMESPACE svc/dagster-webserver 8080:3000"
+else
+  echo "--- Deployment Complete! ---"
+  echo "You can access the Dagster UI at: http://localhost:8080"
+  echo "To check pod status, run: kubectl get pods -n ${NAMESPACE}"
+  echo ""
+  echo "Port forwarding is running in the background (PID: $PORT_FORWARD_PID)"
+  echo "To stop port forwarding: kill $PORT_FORWARD_PID" 
+fi 

@@ -1,4 +1,4 @@
-from dagster import Definitions, EnvVar, FilesystemIOManager, define_asset_job
+from dagster import Definitions, EnvVar, FilesystemIOManager, define_asset_job, AssetKey
 from dagster_aws.s3 import S3Resource
 from dagster_k8s import k8s_job_executor
 from dagster._utils import file_relative_path
@@ -19,7 +19,7 @@ k8s_executor = k8s_job_executor.configured(
         "job_namespace": "dagster",
         "image_pull_policy": "Never",
         "service_account_name": "default",
-        "max_concurrent": 5,  # Allow up to 5 concurrent steps for processing NDVI data
+        "max_concurrent": 3,  # Reduced from 5 to 3 to prevent memory overload
         "step_k8s_config": {
             "container_config": {
                 "resources": {
@@ -40,9 +40,18 @@ k8s_executor = k8s_job_executor.configured(
 # Define a dedicated asset job with the K8s executor
 ndvi_processing_job = define_asset_job(
     name="ndvi_processing_job",
-    selection="ndvi_by_field",
+    selection=[AssetKey("ndvi_by_field")],
     executor_def=k8s_executor,
+    config={
+        "execution": {
+            "config": {
+                "max_concurrent": 3
+            }
+        }
+    },
     tags={
+        "description": "Process NDVI data for fields from their respective planting dates",
+        "output_structure": "output_data/{field_id}/{date}/ndvi_results.json and ndvi_plot.png",
         "dagster-k8s/config": {
             "container_config": {
                 "resources": {
