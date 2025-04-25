@@ -9,6 +9,7 @@ from io import StringIO
 import os
 import boto3
 import traceback
+from shapely.geometry import shape
 
 from dagster import (
     RunRequest,
@@ -37,6 +38,8 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
     Sensor that detects new input files in the MinIO bucket and triggers a backfill
     from each field's planting date to the current date.
     Expects both bounding_box.geojson and fields.geojson files to be present.
+    For each field in fields.geojson, checks if it's within the bounding box.
+    If a field is within the bounding box, triggers a backfill from that field's planting date to the current date.
     """
     try:
         # Get MinIO resource
@@ -148,12 +151,22 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
         
         context.log.info(f"Last processed: {last_processed_timestamp}, Current modified: {fields_last_modified}")
         
-        # Check if we've already processed this version of the file
-        if fields_last_modified <= last_processed_timestamp:
-            return SkipReason(f"No changes to fields.geojson since last processing ({last_processed_timestamp})")
-        
         # Read the fields file to extract field IDs and planting dates
         try:
+            # Get the bounding box GeoJSON from S3/MinIO
+            context.log.info(f"Reading bounding box from {bbox_key}")
+            bbox_response = s3_client.get_object(Bucket=bucket_name, Key=bbox_key)
+            bbox_content = bbox_response['Body'].read().decode('utf-8')
+            
+            # Parse the bounding box GeoJSON
+            bbox_data = json.loads(bbox_content)
+            if 'features' in bbox_data and len(bbox_data['features']) > 0:
+                # Extract the bounding box geometry
+                bbox_geometry = shape(bbox_data['features'][0]['geometry'])
+                context.log.info(f"Successfully parsed bounding box geometry")
+            else:
+                return SkipReason("Invalid bounding box GeoJSON format")
+            
             # Get the fields GeoJSON from S3/MinIO
             context.log.info(f"Reading fields from {fields_key}")
             fields_response = s3_client.get_object(Bucket=bucket_name, Key=fields_key)
@@ -173,39 +186,44 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
             # Convert planting dates to datetime objects
             fields_gdf['planting_date'] = pd.to_datetime(fields_gdf['planting_date'])
             
-            # Use a safe date range - start with 2023-01-01 and process only a few days
-            start_date = datetime.strptime("2023-01-01", "%Y-%m-%d")
-            # Use just one week in the past from our start_date for testing
-            end_date = start_date + timedelta(days=7)
-            context.log.info(f"Using limited date range for testing: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+            # Get the current date to use as the end date for backfill
+            current_date = datetime.now()
+            context.log.info(f"Current date for backfill end: {current_date.strftime('%Y-%m-%d')}")
             
-            # Create run requests for each field and only a few days for testing
+            # Create run requests for each field from planting date to current date
             run_requests = []
             processed_field_count = 0
             
-            # Only process at most 3 fields for initial testing
-            for _, field in fields_gdf.head(3).iterrows():
+            # Process all fields
+            for idx, field in fields_gdf.iterrows():
                 field_id = field['field_id']
-                raw_planting_date = field['planting_date'].to_pydatetime()
+                field_geometry = field['geometry']
                 
-                # Adjust planting date to be within our partition range (2023-01-01 and later)
-                planting_date = max(raw_planting_date, start_date)
+                # Check if the field is within the bounding box
+                if not field_geometry.intersects(bbox_geometry):
+                    context.log.info(f"Field {field_id} is not within the bounding box, skipping")
+                    continue
                 
-                # Skip if planting date is beyond our testing end_date
-                if planting_date > end_date:
-                    context.log.info(f"Field {field_id} has planting date {planting_date.date()} beyond our test range, using start_date instead")
-                    planting_date = start_date
+                context.log.info(f"Field {field_id} is within the bounding box, processing")
+                
+                # Get the planting date for this field
+                planting_date = field['planting_date'].to_pydatetime()
+                
+                # Ensure planting date is valid (not in the future)
+                if planting_date > current_date:
+                    context.log.info(f"Field {field_id} has future planting date {planting_date.date()}, skipping")
+                    continue
                 
                 processed_field_count += 1
-                    
-                # Generate just 3 days for initial testing, regardless of the exact dates
-                day_count = min(3, (end_date - planting_date).days + 1)
-                date_range = []
+                context.log.info(f"Field {field_id}: Planting date {planting_date.strftime('%Y-%m-%d')}")
                 
-                for i in range(day_count):
-                    date_range.append(planting_date + timedelta(days=i))
+                # For testing purposes, limit to processing 5 days from planting date
+                # In production, you'd use: date_range = pd.date_range(start=planting_date, end=current_date)
+                max_days = 5  # Limit to 5 days for testing
+                end_date = min(current_date, planting_date + timedelta(days=max_days))
+                date_range = pd.date_range(start=planting_date, end=end_date)
                 
-                context.log.info(f"Field {field_id}: Processing {len(date_range)} days (limited sample)")
+                context.log.info(f"Field {field_id}: Processing {len(date_range)} days from {planting_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
                 
                 # Create run requests for each date
                 for process_date in date_range:
@@ -231,16 +249,16 @@ def ndvi_input_sensor(context: SensorEvaluationContext):
             context.update_cursor(fields_last_modified)
             
             if not run_requests:
-                return SkipReason("No valid fields or dates to process")
+                return SkipReason("No valid fields within bounding box or with valid planting dates")
             
             # Return all run requests
             context.log.info(f"Processed {processed_field_count} fields with a total of {len(run_requests)} days of NDVI data")
             return run_requests
             
         except Exception as e:
-            context.log.error(f"Error processing fields.geojson: {str(e)}")
+            context.log.error(f"Error processing input files: {str(e)}")
             context.log.error(f"Traceback: {traceback.format_exc()}")
-            return SkipReason(f"Error processing fields.geojson: {str(e)}")
+            return SkipReason(f"Error processing input files: {str(e)}")
     
     except Exception as e:
         context.log.error(f"Unexpected error in sensor: {str(e)}")
