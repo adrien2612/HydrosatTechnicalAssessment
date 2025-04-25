@@ -1,0 +1,65 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "field_id": 1,
+        "planting_date": "2023-04-01",
+        "crop_type": "corn"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-121.08, 38.73],
+            [-121.08, 38.75],
+            [-121.06, 38.75],
+            [-121.06, 38.73],
+            [-121.08, 38.73]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "field_id": 2,
+        "planting_date": "2023-03-15",
+        "crop_type": "soybean"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-121.05, 38.73],
+            [-121.05, 38.75],
+            [-121.03, 38.75],
+            [-121.03, 38.73],
+            [-121.05, 38.73]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "field_id": 3,
+        "planting_date": "2023-05-01",
+        "crop_type": "wheat"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-121.05, 38.76],
+            [-121.05, 38.78],
+            [-121.03, 38.78],
+            [-121.03, 38.76],
+            [-121.05, 38.76]
+          ]
+        ]
+      }
+    }
+  ]
+} 

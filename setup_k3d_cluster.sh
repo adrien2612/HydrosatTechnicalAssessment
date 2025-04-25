@@ -1,2 +1,0 @@
-  --servers-memory 8GB \
-  --agents-memory 8GB 

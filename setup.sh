@@ -13,6 +13,8 @@ MINIO_ACCESS_KEY="minioadmin"
 MINIO_SECRET_KEY="minioadmin"
 DAGSTER_DATA_BUCKET="dagster-data"
 
+echo "=== Setting Up Complete Environment: MinIO + K3D Cluster with Enhanced Resources ==="
+
 echo "--- Checking Prerequisites ---"
 
 # Check for docker
@@ -91,17 +93,32 @@ docker exec ${MINIO_CONTAINER_NAME} bash -c "mkdir -p /data/${DAGSTER_DATA_BUCKE
 echo "Creating directory structure for input_data and processed_data..."
 docker exec ${MINIO_CONTAINER_NAME} bash -c "mkdir -p /data/${DAGSTER_DATA_BUCKET}/input_data/processed_data"
 
-echo -e "\n--- Setting Up K3D Cluster ---"
+echo -e "\n--- Setting Up K3D Cluster with Enhanced Resources ---"
+
+# Fix k3d permissions issue
+echo "Ensuring proper permissions for k3d configuration..."
+mkdir -p ~/.config/k3d
+chmod 755 ~/.config/k3d
+rm -rf ~/.config/k3d/.k3d-${CLUSTER_NAME}-* 2>/dev/null || true
 
 # Check if cluster already exists
 if k3d cluster list | grep -q "^${CLUSTER_NAME}"; then
-    echo "K3D cluster '${CLUSTER_NAME}' already exists. Skipping creation."
-else
-    echo "Creating K3D cluster..."
-    k3d cluster create "${CLUSTER_NAME}" --agents 1
-    sleep 5 # Give it a moment to initialize
-    kubectl wait --for=condition=Ready nodes --all --timeout=60s
+    echo "K3D cluster '${CLUSTER_NAME}' already exists. Stopping and deleting it first..."
+    k3d cluster stop "$CLUSTER_NAME" || true
+    k3d cluster delete "$CLUSTER_NAME" || true
 fi
+
+echo "Creating K3D cluster with basic configuration..."
+k3d cluster create "$CLUSTER_NAME" \
+    --servers 1 \
+    --agents 1 \
+    --api-port 6443 \
+    --no-lb
+
+echo "Ensuring proper kubeconfig setup..."
+mkdir -p ~/.kube
+k3d kubeconfig get "$CLUSTER_NAME" > ~/.kube/config
+chmod 600 ~/.kube/config
 
 echo -e "\n--- Setting Kubectl Context to ${KUBE_CONTEXT} ---"
 kubectl config use-context "${KUBE_CONTEXT}"
@@ -133,9 +150,6 @@ echo "MinIO Bucket: ${DAGSTER_DATA_BUCKET}"
 echo -e "\nNext Steps:"
 echo "1. Open the MinIO Console URL in your browser: http://localhost:${MINIO_PORT}"
 echo "2. Log in using the Access Key: ${MINIO_ACCESS_KEY} and Secret Key: ${MINIO_SECRET_KEY}"
-echo "3. Configure Dagster to use MinIO with the following details:"
-echo "   - S3 Endpoint URL: http://${HOST_IP}:${MINIO_API_PORT}"
-echo "   - Access Key: ${MINIO_ACCESS_KEY}"
-echo "   - Secret Key: ${MINIO_SECRET_KEY}"
-echo "   - Bucket Name: ${DAGSTER_DATA_BUCKET}"
-echo "4. Proceed with building and deploying Dagster to the K3D cluster." 
+echo "3. To verify the cluster is running properly:"
+echo "   kubectl get nodes"
+echo "4. You can now run './simple_deploy_dagster.sh' to deploy Dagster to the cluster." 

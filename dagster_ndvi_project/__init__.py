@@ -1,12 +1,18 @@
-# definitions.py
-
+# Main package __init__.py
 from dagster import Definitions, EnvVar, FilesystemIOManager, define_asset_job, AssetKey
 from dagster_aws.s3 import S3Resource
 from dagster_k8s import k8s_job_executor
 
-from dagster_ndvi_project.resources import MinioResource
-from dagster_ndvi_project.assets import ndvi_by_field
-from dagster_ndvi_project.sensors.optimized_ndvi_sensor import optimized_ndvi_sensor
+from dagster_ndvi_project.dagster_ndvi_project.resources import MinioResource
+from dagster_ndvi_project.dagster_ndvi_project.assets import (
+    load_bounding_box,
+    load_fields,
+    compute_ndvi_raw,
+    daily_ndvi_summary,
+    ndvi_anomaly_detector,
+    ndvi_timeseries_report,
+)
+from dagster_ndvi_project.dagster_ndvi_project.sensors.optimized_ndvi_sensor import optimized_ndvi_sensor
 
 # Local filesystem IO (for intermediate testing)
 local_io_manager = FilesystemIOManager(base_dir="./data")
@@ -29,12 +35,20 @@ k8s_executor = k8s_job_executor.configured({
 
 ndvi_processing_job = define_asset_job(
     name="ndvi_processing_job",
-    selection=[AssetKey("ndvi_by_field")],
+    selection=[AssetKey("compute_ndvi_raw")],
     executor_def=k8s_executor,
 )
 
-definitions = Definitions(
-    assets=[ndvi_by_field],
+# Only define one Definitions object called 'defs'
+defs = Definitions(
+    assets=[
+        load_bounding_box,
+        load_fields,
+        compute_ndvi_raw,
+        daily_ndvi_summary,
+        ndvi_anomaly_detector,
+        ndvi_timeseries_report,
+    ],
     sensors=[optimized_ndvi_sensor],
     jobs=[ndvi_processing_job],
     resources={
@@ -51,4 +65,4 @@ definitions = Definitions(
         ),
         "io_manager": local_io_manager,
     },
-)
+) 

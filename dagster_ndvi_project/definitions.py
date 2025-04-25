@@ -4,9 +4,10 @@ from dagster import Definitions, EnvVar, FilesystemIOManager, define_asset_job, 
 from dagster_aws.s3 import S3Resource
 from dagster_k8s import k8s_job_executor
 
-from dagster_ndvi_project.resources import MinioResource
-from dagster_ndvi_project.assets import ndvi_by_field
-from dagster_ndvi_project.sensors.optimized_ndvi_sensor import optimized_ndvi_sensor
+# Use relative imports within the package
+from dagster_ndvi_project.dagster_ndvi_project.resources import MinioResource
+from dagster_ndvi_project.dagster_ndvi_project.assets import ndvi_by_field
+from dagster_ndvi_project.dagster_ndvi_project.sensors.optimized_ndvi_sensor import optimized_ndvi_sensor
 
 # Local filesystem IO (for intermediate testing)
 local_io_manager = FilesystemIOManager(base_dir="./data")
