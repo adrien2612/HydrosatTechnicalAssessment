@@ -6,7 +6,7 @@ from dagster_k8s import k8s_job_executor
 
 # Use relative imports within the package
 from dagster_ndvi_project.dagster_ndvi_project.resources import MinioResource
-from dagster_ndvi_project.dagster_ndvi_project.assets import ndvi_by_field
+from dagster_ndvi_project.dagster_ndvi_project.assets import compute_ndvi_raw
 from dagster_ndvi_project.dagster_ndvi_project.sensors.optimized_ndvi_sensor import optimized_ndvi_sensor
 
 # Local filesystem IO (for intermediate testing)
@@ -30,12 +30,12 @@ k8s_executor = k8s_job_executor.configured({
 
 ndvi_processing_job = define_asset_job(
     name="ndvi_processing_job",
-    selection=[AssetKey("ndvi_by_field")],
+    selection=[AssetKey("compute_ndvi_raw")],
     executor_def=k8s_executor,
 )
 
 definitions = Definitions(
-    assets=[ndvi_by_field],
+    assets=[compute_ndvi_raw],
     sensors=[optimized_ndvi_sensor],
     jobs=[ndvi_processing_job],
     resources={

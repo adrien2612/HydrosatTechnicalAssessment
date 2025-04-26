@@ -1,13 +1,17 @@
 # dagster_ndvi_project/sensors/optimized_ndvi_sensor.py
 
-from dagster import sensor, SensorEvaluationContext, RunRequest, SkipReason
+from dagster import sensor, SensorEvaluationContext, RunRequest, SkipReason, AssetKey
 from datetime import datetime, timedelta
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import shape
 from io import StringIO
 
-@sensor(minimum_interval_seconds=60, required_resource_keys={"minio"})
+@sensor(
+    minimum_interval_seconds=60, 
+    required_resource_keys={"minio"},
+    job_name="ndvi_processing_job"  # Specify the target job
+)
 def optimized_ndvi_sensor(context: SensorEvaluationContext):
     """
     On every run, look for both bounding_box.geojson & fields.geojson in MinIO.

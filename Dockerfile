@@ -27,13 +27,8 @@ ENV DAGSTER_HOME=/opt/dagster/dagster_home
 RUN mkdir -p /opt/dagster/app /opt/dagster/dagster_home
 COPY workspace.yaml /opt/dagster/app/workspace.yaml
 
-# Create basic dagster.yaml config
-RUN echo 'scheduler:' > /opt/dagster/dagster_home/dagster.yaml && \
-    echo '  module: dagster.core.scheduler' >> /opt/dagster/dagster_home/dagster.yaml && \
-    echo '  class: DagsterDaemonScheduler' >> /opt/dagster/dagster_home/dagster.yaml && \
-    echo 'run_coordinator:' >> /opt/dagster/dagster_home/dagster.yaml && \
-    echo '  module: dagster.core.run_coordinator' >> /opt/dagster/dagster_home/dagster.yaml && \
-    echo '  class: QueuedRunCoordinator' >> /opt/dagster/dagster_home/dagster.yaml
+# Copy dagster.yaml configuration file
+COPY dagster.yaml /opt/dagster/dagster_home/dagster.yaml
 
 # Copy requirements.txt first to leverage Docker caching
 COPY requirements.txt .
