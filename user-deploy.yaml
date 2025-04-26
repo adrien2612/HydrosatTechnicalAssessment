@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"dagster-user-deploy","namespace":"dagster"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"dagster-user-deploy"}},"template":{"metadata":{"labels":{"app":"dagster-user-deploy"}},"spec":{"containers":[{"args":["grpc"],"command":["/entrypoint.sh"],"env":[{"name":"DAGSTER_HOME","value":"/opt/dagster/dagster_home"}],"envFrom":[{"configMapRef":{"name":"dagster-config"}},{"secretRef":{"name":"minio-creds"}}],"image":"dagster-ndvi:latest","imagePullPolicy":"Never","name":"user-deploy","ports":[{"containerPort":4000}],"resources":{"limits":{"memory":"1Gi"},"requests":{"memory":"512Mi"}},"volumeMounts":[{"mountPath":"/opt/dagster/dagster_home","name":"dagster-home"}]}],"volumes":[{"emptyDir":{},"name":"dagster-home"}]}}}}
+  creationTimestamp: "2025-04-26T06:35:31Z"
+  generation: 1
+  name: dagster-user-deploy
+  namespace: dagster
+  resourceVersion: "2112"
+  uid: 1986c41e-4cdb-4369-9809-e09dba0a7db2
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: dagster-user-deploy
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: dagster-user-deploy
+    spec:
+      containers:
+      - args:
+        - grpc
+        command:
+        - /entrypoint.sh
+        env:
+        - name: DAGSTER_HOME
+          value: /opt/dagster/dagster_home
+        envFrom:
+        - configMapRef:
+            name: dagster-config
+        - secretRef:
+            name: minio-creds
+        image: dagster-ndvi:latest
+        imagePullPolicy: Never
+        name: user-deploy
+        ports:
+        - containerPort: 4000
+          protocol: TCP
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            memory: 512Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /opt/dagster/dagster_home
+          name: dagster-home
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: dagster-home
+status:
+  availableReplicas: 1
+  conditions:
+  - lastTransitionTime: "2025-04-26T06:35:32Z"
+    lastUpdateTime: "2025-04-26T06:35:36Z"
+    message: ReplicaSet "dagster-user-deploy-54cb5b77c4" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  - lastTransitionTime: "2025-04-26T07:08:28Z"
+    lastUpdateTime: "2025-04-26T07:08:28Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  observedGeneration: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1

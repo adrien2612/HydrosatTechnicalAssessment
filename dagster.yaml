@@ -6,8 +6,6 @@ run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
 
-sensors:
-  default_status: RUNNING
   
 telemetry:
   enabled: false 

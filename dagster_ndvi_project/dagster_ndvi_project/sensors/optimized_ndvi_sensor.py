@@ -1,22 +1,25 @@
 # dagster_ndvi_project/sensors/optimized_ndvi_sensor.py
 
-from dagster import sensor, SensorEvaluationContext, RunRequest, SkipReason, AssetKey
+from dagster import sensor, SensorEvaluationContext, RunRequest, SkipReason, AssetKey, DefaultSensorStatus, AssetSelection
 from datetime import datetime, timedelta
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import shape
 from io import StringIO
+import hashlib
+import json
 
 @sensor(
-    minimum_interval_seconds=60, 
+    minimum_interval_seconds=60,
     required_resource_keys={"minio"},
-    job_name="ndvi_processing_job"  # Specify the target job
+    default_status=DefaultSensorStatus.RUNNING,  # Start the sensor automatically
+    job_name="ndvi_processing_job"
 )
 def optimized_ndvi_sensor(context: SensorEvaluationContext):
     """
-    On every run, look for both bounding_box.geojson & fields.geojson in MinIO.
-    If present, read planting_date per field and emit a RunRequest for each
-    date from planting_date up to today, targeting our ndvi_by_field asset.
+    Sensor to trigger the load_fields asset when new data is detected.
+    This will register field_id partitions and establish the foundation
+    for downstream assets to be materialized.
     """
     s3 = context.resources.minio.get_s3_client()
     bucket = context.resources.minio.bucket_name
@@ -26,34 +29,37 @@ def optimized_ndvi_sensor(context: SensorEvaluationContext):
     keys = {o["Key"] for o in objs}
     if not {"input_data/bounding_box.geojson", "input_data/fields.geojson"}.issubset(keys):
         return SkipReason("waiting for both bounding_box.geojson and fields.geojson")
+    
+    # Check for file modifications using etags and last_modified
+    bounding_box_meta = s3.head_object(Bucket=bucket, Key="input_data/bounding_box.geojson")
+    fields_meta = s3.head_object(Bucket=bucket, Key="input_data/fields.geojson")
+    
+    # Generate a combined hash of the ETags and last modified times
+    current_hash = hashlib.md5(
+        (bounding_box_meta["ETag"] + str(bounding_box_meta["LastModified"]) +
+         fields_meta["ETag"] + str(fields_meta["LastModified"])).encode()
+    ).hexdigest()
+    
+    # Check if we've seen these files before
+    cursor = context.cursor or "{}"
+    cursor_data = json.loads(cursor)
+    last_hash = cursor_data.get("files_hash", "")
+    
+    # If no change in files, skip processing
+    if current_hash == last_hash:
+        return SkipReason("No new file uploads detected")
+    
+    # Update cursor with the new hash
+    cursor_data["files_hash"] = current_hash
+    context.update_cursor(json.dumps(cursor_data))
+    
+    # New or modified files detected, process them
+    context.log.info("Detected new or modified input files, processing...")
 
-    # load fields
-    fields_obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
-    gdf = gpd.read_file(StringIO(fields_obj["Body"].read().decode()))
-    gdf["planting_date"] = pd.to_datetime(gdf["planting_date"])
-
-    today = datetime.utcnow().date()
-    requests = []
-    for _, row in gdf.iterrows():
-        fid = row["field_id"]
-        start = row["planting_date"].date()
-        end = today
-        # for safety, cap at 5 years
-        if end > start + timedelta(days=365 * 5):
-            end = start + timedelta(days=365 * 5)
-        for dt in pd.date_range(start=start, end=end):
-            partition = dt.strftime("%Y-%m-%d")
-            run_key = f"{fid}-{partition}"
-            requests.append(
-                RunRequest(
-                    run_key=run_key,
-                    tags={"field_id": str(fid)},
-                    partition_key=partition,
-                )
-            )
-
-    if not requests:
-        return SkipReason("no new backfill partitions to launch")
-
-    context.log.info(f"Enqueuing {len(requests)} NDVI runs")
-    return requests
+    # Create a run request to materialize load_fields asset only
+    # This will register field_id partitions before downstream assets try to use them
+    # Use AssetSelection instead of direct AssetKey
+    load_fields_selection = AssetSelection.keys("load_fields")
+    return [RunRequest(
+        run_key=f"load_fields-{datetime.now().isoformat()}",
+    )]

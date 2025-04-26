@@ -85,9 +85,42 @@ def load_fields(context: AssetExecutionContext) -> gpd.GeoDataFrame:
     min_date = gdf["planting_date"].min().date()
     max_date = gdf["planting_date"].max().date()
     context.log.info(f"[load_fields] Parsed planting dates from {min_date} to {max_date}")
-    new_ids = [str(fid) for fid in gdf["field_id"].unique()]
-    context.log.info(f"[load_fields] Registering {len(new_ids)} dynamic partitions: {new_ids}")
-    field_partitions.add_partitions(new_ids)
+    
+    # Ensure field_ids are in the correct format for partitioning
+    # Logging original field IDs to diagnose
+    context.log.info(f"[load_fields] Original field IDs: {list(gdf['field_id'])}")
+    
+    # Extract field_ids in the format expected by the partition system
+    # If the fields.geojson has "F001" format, use as is; if numeric, convert appropriately
+    field_ids = []
+    for fid in gdf["field_id"]:
+        if isinstance(fid, (int, float)):
+            # For numeric field IDs, decide on your preferred format
+            # Either: use numeric as is
+            field_ids.append(str(int(fid)))
+            # Or: convert to F-prefixed format (uncomment if needed)
+            # field_ids.append(f"F{int(fid):03d}")
+        else:
+            # For string field IDs, use as is
+            field_ids.append(str(fid))
+    
+    context.log.info(f"[load_fields] Registering {len(field_ids)} dynamic partitions: {field_ids}")
+    
+    # IMPORTANT: Add partitions with proper error handling
+    try:
+        # Clear existing partitions to avoid stale data
+        current_partitions = field_partitions.get_partitions()
+        if current_partitions:
+            context.log.info(f"Removing existing partitions: {current_partitions}")
+            field_partitions.delete_partitions(current_partitions)
+            
+        # Add new partitions
+        field_partitions.add_partitions(field_ids)
+        context.log.info(f"Successfully registered field partitions: {field_ids}")
+    except Exception as e:
+        context.log.error(f"Error managing partitions: {e}")
+        # Continue execution even if partition management fails
+    
     context.log.info("[load_fields] Completed successfully")
     return gdf
 
@@ -107,10 +140,31 @@ def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
     context.log.info(f"[compute_ndvi_raw] Loading fields.geojson from bucket={bucket}")
     obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
     fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
-    row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+    
+    # More flexible field_id matching to handle different formats
+    # Log the field_id types in the GeoDataFrame to help diagnose issues
+    context.log.info(f"[compute_ndvi_raw] Field IDs in GeoJSON: {list(fields_gdf['field_id'])} (types: {[type(fid).__name__ for fid in fields_gdf['field_id']]}")
+    context.log.info(f"[compute_ndvi_raw] Looking for field_id: {field_id} (type: {type(field_id).__name__})")
+    
+    # Try multiple matching strategies
+    if field_id.isdigit():
+        # If field_id from partition is numeric
+        row = fields_gdf[fields_gdf["field_id"].astype(str) == field_id]
+        if row.empty:
+            # Try as integer
+            try:
+                row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+            except:
+                pass
+    else:
+        # If field_id from partition is already a string with non-numeric chars
+        row = fields_gdf[fields_gdf["field_id"].astype(str) == field_id]
+    
     if row.empty:
         context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        context.log.info(f"[compute_ndvi_raw] Available fields: {list(fields_gdf['field_id'])}")
         raise SkipReason(f"Field {field_id} not found")
+        
     geom = row.iloc[0].geometry
     planting_date = row.iloc[0].planting_date
     context.log.info(f"[compute_ndvi_raw] Field geom bounds: {geom.bounds}")

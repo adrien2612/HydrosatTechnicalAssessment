@@ -186,8 +186,10 @@ spec:
 EOF
 
 # --- 6) (Optional) Port-forward to access Dagit & gRPC locally ---
-echo "To access Dagit, run:"
-echo "  kubectl port-forward -n $NAMESPACE svc/dagit 3000:80"
+echo "Dagit deployed at http://localhost:3000:80"
+echo "Waiting for Dagster to be ready..."
+sleep 60
+kubectl port-forward -n $NAMESPACE svc/dagit 3000:80
 echo "To access Dagster gRPC API, run:"
 echo "  kubectl port-forward -n $NAMESPACE svc/dagster-grpc 4000:4000"
 
