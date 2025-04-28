@@ -12,26 +12,10 @@ from dagster_ndvi_project.dagster_ndvi_project.sensors.optimized_ndvi_sensor imp
 # Local filesystem IO (for intermediate testing)
 local_io_manager = FilesystemIOManager(base_dir="./data")
 
-# K8s executor config — k3d is Kubernetes under the hood, so use the same executor.
-k8s_executor = k8s_job_executor.configured({
-    "job_namespace": "dagster",
-    "image_pull_policy": "IfNotPresent",
-    "service_account_name": "default",
-    "max_concurrent": 3,
-    "step_k8s_config": {
-        "container_config": {
-            "resources": {
-                "requests": {"cpu": "250m", "memory": "512Mi"},
-                "limits":   {"cpu": "1",   "memory": "1Gi"},
-            }
-        }
-    },
-})
-
+# Define the job without a specific executor
 ndvi_processing_job = define_asset_job(
     name="ndvi_processing_job",
     selection=[AssetKey("compute_ndvi_raw"), AssetKey("load_fields")],
-    executor_def=k8s_executor,
 )
 
 definitions = Definitions(

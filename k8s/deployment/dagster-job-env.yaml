@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dagster-job-env
+  namespace: dagster
+data:
+  DAGSTER_HOME: /opt/dagster/dagster_home
+  MINIO_ENDPOINT_URL: http://minio-service:9000 

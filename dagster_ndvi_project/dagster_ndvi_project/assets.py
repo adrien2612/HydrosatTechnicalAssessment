@@ -130,6 +130,15 @@ def load_fields(context: AssetExecutionContext) -> gpd.GeoDataFrame:
     description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
 )
 def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # Add safety checks for partition keys
+    if not context.has_partition_key_for_dimension("field_id"):
+        context.log.error("[compute_ndvi_raw] No field_id partition key available")
+        raise SkipReason("No field_id partition key available")
+    
+    if not context.has_partition_key_for_dimension("date"):
+        context.log.error("[compute_ndvi_raw] No date partition key available")
+        raise SkipReason("No date partition key available")
+    
     field_id = context.partition_key_for_dimension("field_id")
     date_str = context.partition_key_for_dimension("date")
     context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
@@ -250,7 +259,12 @@ def ndvi_anomaly_detector(context: AssetExecutionContext, compute_ndvi_raw) -> L
     description="Generate NDVI time series CSV for each field",
 )
 def ndvi_timeseries_report(context: AssetExecutionContext, compute_ndvi_raw) -> MetadataValue:
-    field_id = context.get_partition_key_for_dimension("field_id")
+    # Add safety check for partition key
+    if not context.has_partition_key_for_dimension("field_id"):
+        context.log.error("[ndvi_timeseries_report] No field_id partition key available")
+        raise SkipReason("No field_id partition key available")
+        
+    field_id = context.partition_key_for_dimension("field_id")
     context.log.info(f"[ndvi_timeseries_report] Generating report for field={field_id}")
     dates = pd.date_range(end=datetime.now(), periods=30)
     values = np.random.rand(30)

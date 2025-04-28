@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dagster-user-deploy
+  namespace: dagster
+spec:
+  template:
+    spec:
+      volumes:
+      - name: dagster-home
+        emptyDir: {}
+      - name: dagster-yaml
+        configMap:
+          name: dagster-yaml-config
+      containers:
+      - name: user-deploy
+        volumeMounts:
+        - name: dagster-home
+          mountPath: /opt/dagster/dagster_home
+        - name: dagster-yaml
+          mountPath: /opt/dagster/dagster_home/dagster.yaml
+          subPath: dagster.yaml 

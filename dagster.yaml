@@ -6,6 +6,18 @@ run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
 
+run_launcher:
+  module: dagster_k8s
+  class: K8sRunLauncher
+  config:
+    job_namespace: dagster
+    image_pull_policy: IfNotPresent
+    service_account_name: default
+    load_incluster_config: true
+    env_config_maps:
+      - dagster-job-env
+    env_secrets:
+      - dagster-job-secrets
   
 telemetry:
   enabled: false 

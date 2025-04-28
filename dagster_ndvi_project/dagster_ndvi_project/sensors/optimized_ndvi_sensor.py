@@ -13,7 +13,7 @@ import json
     minimum_interval_seconds=60,
     required_resource_keys={"minio"},
     default_status=DefaultSensorStatus.RUNNING,  # Start the sensor automatically
-    job_name="ndvi_processing_job"
+    job_name="ndvi_processing_job"  # Specify the job to trigger
 )
 def optimized_ndvi_sensor(context: SensorEvaluationContext):
     """
@@ -53,13 +53,9 @@ def optimized_ndvi_sensor(context: SensorEvaluationContext):
     cursor_data["files_hash"] = current_hash
     context.update_cursor(json.dumps(cursor_data))
     
-    # New or modified files detected, process them
-    context.log.info("Detected new or modified input files, processing...")
-
-    # Create a run request to materialize load_fields asset only
-    # This will register field_id partitions before downstream assets try to use them
-    # Use AssetSelection instead of direct AssetKey
-    load_fields_selection = AssetSelection.keys("load_fields")
-    return [RunRequest(
-        run_key=f"load_fields-{datetime.now().isoformat()}",
-    )]
+    # New or modified files detected, log info and trigger a run
+    context.log.info("Detected new or modified input files.")
+    context.log.info(f"Files detected: bounding_box.geojson, fields.geojson at {datetime.now().isoformat()}")
+    
+    # Return a RunRequest to trigger the job instead of skipping
+    return RunRequest(run_key=f"input_files_{current_hash[:8]}", tags={"source": "optimized_ndvi_sensor"})

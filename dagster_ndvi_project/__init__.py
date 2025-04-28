@@ -1,7 +1,6 @@
 # Main package __init__.py
 from dagster import Definitions, EnvVar, FilesystemIOManager, define_asset_job, AssetKey
 from dagster_aws.s3 import S3Resource
-from dagster_k8s import k8s_job_executor
 
 from dagster_ndvi_project.dagster_ndvi_project.resources import MinioResource
 from dagster_ndvi_project.dagster_ndvi_project.assets import (
@@ -17,26 +16,10 @@ from dagster_ndvi_project.dagster_ndvi_project.sensors.optimized_ndvi_sensor imp
 # Local filesystem IO (for intermediate testing)
 local_io_manager = FilesystemIOManager(base_dir="./data")
 
-# K8s executor config — k3d is Kubernetes under the hood, so use the same executor.
-k8s_executor = k8s_job_executor.configured({
-    "job_namespace": "dagster",
-    "image_pull_policy": "IfNotPresent",
-    "service_account_name": "default",
-    "max_concurrent": 3,
-    "step_k8s_config": {
-        "container_config": {
-            "resources": {
-                "requests": {"cpu": "250m", "memory": "512Mi"},
-                "limits":   {"cpu": "1",   "memory": "1Gi"},
-            }
-        }
-    },
-})
-
+# Define the job without a specific executor
 ndvi_processing_job = define_asset_job(
     name="ndvi_processing_job",
     selection=[AssetKey("compute_ndvi_raw")],
-    executor_def=k8s_executor,
 )
 
 # Only define one Definitions object called 'defs'

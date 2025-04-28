@@ -1,137 +1,131 @@
-# Dagster NDVI Pipeline Project
+# Dagster NDVI Processing Pipeline
 
-This project implements a Normalized Difference Vegetation Index (NDVI) processing pipeline using Dagster on Kubernetes. The pipeline is configured to process geospatial data from MinIO storage.
+This project implements a Normalized Difference Vegetation Index (NDVI) processing pipeline using Dagster, deployed on Kubernetes. The pipeline processes satellite imagery data to calculate vegetation indices for agricultural fields.
+
+## Project Overview
+
+The NDVI pipeline performs the following operations:
+- Monitors a MinIO bucket for new field geometry files
+- Registers field partitions dynamically
+- Fetches Sentinel-2 satellite data via STAC API
+- Computes NDVI values for each field
+- Generates time series reports and anomaly detection
 
 ## Project Structure
 
-- `dagster_ndvi_project/` - Main Dagster code
-  - `assets.py` - Asset definitions (NDVI processing logic)
-  - `sensors.py` - Sensors for detecting new input data
-  - `resources.py` - Resource definitions (MinIO connectivity)
-  - `definitions.py` - Dagster definitions
-- `helm-dagster-values.yaml` - Helm chart values for Dagster deployment
-- `sample_fields.geojson` - Sample input data for testing
-- `upload_test_data.py` - Script to upload test data to MinIO
-- `test_utils.sh` - Helper functions for testing
-
-## Requirements
-
-- Kubernetes cluster (local or remote)
-- Helm
-- kubectl
-- Python 3.8+
-- MinIO instance (running in Kubernetes or externally)
-
-## Setup Instructions
-
-### 1. Deploy MinIO to Kubernetes
-
-```bash
-# Add MinIO Helm repository
-helm repo add minio https://charts.min.io/
-
-# Install MinIO in the dagster namespace
-helm install minio minio/minio \
-  --namespace dagster \
-  --create-namespace \
-  --set accessKey=minioadmin \
-  --set secretKey=minioadmin \
-  --set persistence.enabled=false \
-  --set service.type=ClusterIP
+```
+.
+├── dagster_ndvi_project/           # Main Dagster package
+│   ├── dagster_ndvi_project/       # Core code package
+│   │   ├── assets.py               # Asset definitions (NDVI processing)
+│   │   ├── resources.py            # Resource definitions (MinIO connectivity)
+│   │   ├── definitions.py          # Job and repository definitions
+│   │   └── sensors/                # Sensor definitions
+│   │       └── optimized_ndvi_sensor.py  # Sensor to detect new input files
+│   ├── __init__.py                 # Package initialization
+│   └── setup.py                    # Package setup
+├── k8s/                            # Kubernetes deployment templates (OPTIONAL)
+├── input_data/                     # Sample input data for testing
+├── Dockerfile                      # Docker image definition
+├── requirements.txt                # Python dependencies
+├── workspace.yaml                  # Dagster workspace configuration
+└── deplo_new_dagster.sh            # Deployment script for Kubernetes
 ```
 
-### 2. Build and Deploy the Dagster NDVI Project
+## Prerequisites
+
+- Kubernetes cluster (can be local using k3d, minikube, etc.)
+- Docker
+- kubectl command-line tool
+- MinIO instance (or S3-compatible storage)
+
+## Quick Start
+
+### 1. Build the Docker Image
 
 ```bash
-# Build the Docker image
-docker build -t my-dagster-ndvi-project:latest .
-
-# Deploy Dagster with Helm
-helm repo add dagster https://dagster-io.github.io/helm
-helm repo update
-
-# Install Dagster with our custom values
-helm install dagster dagster/dagster \
-  --namespace dagster \
-  --create-namespace \
-  -f helm-dagster-values.yaml
+docker build -t dagster-ndvi:latest .
 ```
 
-### 3. Upload Test Data
+### 2. Import the Image to K3d (if using k3d)
 
 ```bash
-# Source the helper functions
-source test_utils.sh
-
-# Upload test data to MinIO
-upload_test_data
+k3d image import dagster-ndvi:latest -c <your-cluster-name>
 ```
 
-### 4. Access the Dagster UI
+### 3. Deploy to Kubernetes
 
 ```bash
-# Port-forward the Dagster webserver
-kubectl port-forward -n dagster svc/dagster-webserver 3000:80
+./deplo_new_dagster.sh
 ```
 
-Visit http://localhost:3000 in your browser.
-
-## Testing the Pipeline
-
-The project includes a simple test asset (`simple_field_id`) and a simplified sensor (`ndvi_simple_sensor`) to test the pipeline functionality with minimal dependencies.
-
-### Running Test Utils
+### 4. Access the Dagit UI
 
 ```bash
-# Source the test utilities
-source test_utils.sh
-
-# See available functions
-show_help
-
-# Check Dagster deployment status
-check_dagster_status
-
-# List recent runs
-list_runs
-
-# Check logs for a specific run
-check_run_logs <run_id>
+kubectl -n dagster port-forward svc/dagit 3000:80
 ```
 
-## Configuring the Dagster Instance
+Then visit http://localhost:3000 in your browser.
 
-The Dagster instance is configured to limit the maximum number of concurrent runs to 1 using the `QueuedRunCoordinator` with `maxConcurrentRuns: 1`. This configuration is defined in the `helm-dagster-values.yaml` file.
+## Required Environment Variables
 
-To apply changes to the instance configuration:
+The following environment variables are required for the pipeline to run:
 
+- `MINIO_ENDPOINT_URL`: URL for the MinIO service
+- `MINIO_ACCESS_KEY`: Access key for MinIO
+- `MINIO_SECRET_KEY`: Secret key for MinIO
+- `MINIO_BUCKET_NAME`: Bucket name for storing input and output data
+
+These are configured in the Kubernetes deployment files.
+
+## Input Data Format
+
+The pipeline expects two GeoJSON files in the MinIO bucket at the following paths:
+- `input_data/fields.geojson`: Contains field geometries with `field_id` and `planting_date` properties
+- `input_data/bounding_box.geojson`: Contains an area of interest bounding box
+
+Example fields.geojson structure:
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "field_id": "F001",
+        "planting_date": "2023-03-15"
+      },
+      "geometry": {...}
+    }
+  ]
+}
+```
+
+## Recent Improvements
+
+- Added partition key safety checks to prevent AttributeError exceptions
+- Fixed method name in timeseries report asset
+- Improved sensor logic to properly trigger the ndvi_processing_job
+- Ensured proper field_id resolution between string and numeric formats
+- Added comprehensive logging for troubleshooting
+
+## Troubleshooting
+
+### Check Pod Status
 ```bash
-# Source the test utilities
-source test_utils.sh
-
-# Apply the instance configuration
-apply_instance_config
+kubectl -n dagster get pods
 ```
 
-## Debugging
-
-The project includes extensive logging in both the sensor and asset code to help diagnose issues. You can check the logs of the Dagster daemon and run pods:
-
+### View Pod Logs
 ```bash
-# Check Dagster daemon logs
-kubectl logs -n dagster $(kubectl get pods -n dagster -l app=dagster-daemon -o jsonpath='{.items[0].metadata.name}')
-
-# Check logs for a specific run
-kubectl logs -n dagster <run-pod-name>
+kubectl -n dagster logs <pod-name>
 ```
 
-## MinIO Configuration
+### Check Sensor Logs
+```bash
+kubectl -n dagster logs -f <dagster-daemon-pod-name>
+```
 
-The MinIO configuration is defined in environment variables:
+## License
 
-- `MINIO_ENDPOINT_URL` - MinIO endpoint URL
-- `MINIO_ACCESS_KEY` - MinIO access key
-- `MINIO_SECRET_KEY` - MinIO secret key
-- `MINIO_BUCKET_NAME` - MinIO bucket name
-
-These variables are set in the Helm values file and passed to all Dagster components. 
+This project is licensed under the MIT License - see the LICENSE file for details. 
