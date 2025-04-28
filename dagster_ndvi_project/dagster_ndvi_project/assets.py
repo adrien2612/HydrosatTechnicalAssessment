@@ -113,18 +113,20 @@ def load_fields(context: AssetExecutionContext) -> gpd.GeoDataFrame:
     description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
 )
 def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
-    field_id = context.partition_key_for_dimension("field_id")
-    date_str = context.partition_key_for_dimension("date")
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
     context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
     date = datetime.fromisoformat(date_str)
 
+    # load your GeoJSON and find the right field
     s3 = context.resources.minio.get_s3_client()
     bucket = context.resources.minio.bucket_name
-    context.log.info(f"[compute_ndvi_raw] Loading fields.geojson from bucket={bucket}")
     obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
     fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
 
-    # Match field_id robustly
+    # match by string first, then by int
     str_ids = fields_gdf["field_id"].astype(str)
     if field_id in str_ids.values:
         row = fields_gdf[str_ids == field_id]
@@ -141,27 +143,28 @@ def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
     geom = row.iloc[0].geometry
     planting_date = row.iloc[0].planting_date
     if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
         raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
 
-    items = list(
-        stac_client.search(
-            collections=["sentinel-s2-l2a"],
-            intersects=mapping(geom),
-            datetime=date_str,
-            query={"eo:cloud_cover": {"lt": 20}},
-        ).get_items()
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
     )
+    items = list(search.get_items())
     if not items:
         raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
     item = items[0]
 
-    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x":512,"y":512})[0]
-    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x":512,"y":512})[0]
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
     red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
     nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
 
     ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
     mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
 
     return Output(
         ndvi,
@@ -171,6 +174,4291 @@ def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
             "mean_ndvi": MetadataValue.float(mean_val),
         },
     )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
+@asset(
+    partitions_def=multi_partitions,
+    required_resource_keys={"minio"},
+    description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
+)
+def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
+    # context.partition_key will be e.g. "F001/2023-03-15"
+    composite_key = context.partition_key
+    field_id, date_str = composite_key.split("/", 1)
+
+    context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
+    date = datetime.fromisoformat(date_str)
+
+    # load your GeoJSON and find the right field
+    s3 = context.resources.minio.get_s3_client()
+    bucket = context.resources.minio.bucket_name
+    obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
+    fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
+
+    # match by string first, then by int
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
+    else:
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
+    if row.empty:
+        context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
+        raise SkipReason(f"Field {field_id} not found")
+
+    geom = row.iloc[0].geometry
+    planting_date = row.iloc[0].planting_date
+    if date < planting_date:
+        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
+        raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
+
+    search = stac_client.search(
+        collections=["sentinel-s2-l2a"],
+        intersects=mapping(geom),
+        datetime=date_str,
+        query={"eo:cloud_cover": {"lt": 20}},
+    )
+    items = list(search.get_items())
+    if not items:
+        raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
+    item = items[0]
+
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x": 512, "y": 512})[0]
+    red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
+    nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
+
+    ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
+    mean_val = float(ndvi.mean().compute().item())
+    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
+
+    return Output(
+        ndvi,
+        metadata={
+            "field_id": MetadataValue.text(field_id),
+            "date": MetadataValue.text(date_str),
+            "mean_ndvi": MetadataValue.float(mean_val),
+        },
+    )
+
 
 @asset(
     partitions_def=daily_partitions,

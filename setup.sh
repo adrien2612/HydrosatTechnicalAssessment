@@ -152,4 +152,4 @@ echo "1. Open the MinIO Console URL in your browser: http://localhost:${MINIO_PO
 echo "2. Log in using the Access Key: ${MINIO_ACCESS_KEY} and Secret Key: ${MINIO_SECRET_KEY}"
 echo "3. To verify the cluster is running properly:"
 echo "   kubectl get nodes"
-echo "4. You can now run './simple_deploy_dagster.sh' to deploy Dagster to the cluster." 
+echo "4. You can now run './deploy_dagster.sh' to deploy Dagster to the cluster." 

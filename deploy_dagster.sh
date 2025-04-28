@@ -108,10 +108,6 @@ spec:
     targetPort: 3000
 EOF
 
-echo "Deployment completed!"
-echo "Dagit is deployed at http://localhost:3000 (after port-forwarding)"
-echo "To access the UI, run: kubectl -n $NAMESPACE port-forward svc/dagit 3000:80"
-
 # Wait for the dagit pod to be ready
 echo "Waiting for Dagit pod to be ready..."
 kubectl -n $NAMESPACE wait --for=condition=ready pod -l app=dagit --timeout=120s
@@ -123,3 +119,7 @@ kubectl -n $NAMESPACE get pods
 # Now set up port-forwarding
 echo "Setting up port-forwarding..."
 kubectl -n $NAMESPACE port-forward svc/dagit 3000:80 
+
+echo "Deployment completed!"
+echo "Dagit is deployed at http://localhost:3000 (after port-forwarding)"
+echo "To access the UI, run: kubectl -n $NAMESPACE port-forward svc/dagit 3000:80"

@@ -11,18 +11,89 @@ The NDVI pipeline performs the following operations:
 - Computes NDVI values for each field
 - Generates time series reports and anomaly detection
 
-## What is NDVI?
+## Pipeline Assets & Data Flow
 
-NDVI (Normalized Difference Vegetation Index) is a simple graphical indicator used to analyze remote sensing measurements, typically from satellite imagery, to assess whether the target being observed contains live green vegetation. The calculation uses the visible and near-infrared light reflected by vegetation:
+The pipeline consists of several interconnected assets that process data in a specific sequence:
+
+### 1. `load_bounding_box` Asset
+- **Purpose**: Loads the study area boundary from a GeoJSON file
+- **Input**: `input_data/bounding_box.geojson` from MinIO
+- **Processing**: Parses the GeoJSON and converts it to a Shapely geometry
+- **Output**: A dictionary containing the geometry and its bounds
+- **Triggers**: Materializes when files are detected by the sensor
+
+### 2. `load_fields` Asset
+- **Purpose**: Loads field boundaries and creates field partitions dynamically
+- **Input**: `input_data/fields.geojson` from MinIO
+- **Processing**: 
+  - Validates required columns (`field_id`, `planting_date`)
+  - Registers each field as a dynamic partition
+  - Parses dates and converts geometries
+- **Output**: A GeoDataFrame containing all fields with their properties
+- **Triggers**: Materializes when files are detected by the sensor
+
+### 3. `compute_ndvi_raw` Asset
+- **Purpose**: Calculates NDVI for each field on each date
+- **Input**: 
+  - Field geometries from `load_fields`
+  - Sentinel-2 satellite imagery via STAC API
+- **Processing**:
+  - For each (field_id, date) partition combination:
+    - Retrieves field geometry and planting date
+    - Searches for Sentinel-2 imagery on the specified date
+    - Downloads Red (B04) and Near-Infrared (B08) bands
+    - Clips bands to field boundary
+    - Calculates NDVI: (NIR - RED) / (NIR + RED)
+- **Output**: A DataArray containing NDVI values and metadata
+- **Partitioning**: Multi-partitioned by field_id and date
+- **Triggers**: Materializes for each field after partitions are created
+
+### 4. `daily_ndvi_summary` Asset
+- **Purpose**: Aggregates NDVI values across all fields by date
+- **Input**: NDVI values from `compute_ndvi_raw`
+- **Processing**: Calculates average NDVI for each date
+- **Output**: JSON summary stored at `output_data/summary/{date}/daily_summary.json`
+- **Partitioning**: Partitioned by date
+- **Triggers**: Materializes after NDVI computation for all fields on a date
+
+### 5. `ndvi_anomaly_detector` Asset
+- **Purpose**: Detects fields with abnormally low NDVI values
+- **Input**: NDVI values from `compute_ndvi_raw`
+- **Processing**: Flags fields with NDVI below threshold (0.2)
+- **Output**: List of anomaly messages for detected issues
+- **Triggers**: Materializes after NDVI computation
+
+### 6. `ndvi_timeseries_report` Asset
+- **Purpose**: Generates time series reports for each field
+- **Input**: NDVI values from `compute_ndvi_raw`
+- **Processing**: Compiles NDVI values over time for each field
+- **Output**: CSV report stored at `output_data/timeseries/{field_id}/report.csv`
+- **Partitioning**: Partitioned by field_id
+- **Triggers**: Materializes after NDVI computation for all dates for a field
+
+### Sensor: `optimized_ndvi_sensor`
+- **Purpose**: Monitors MinIO for new or modified input files
+- **Input**: S3 bucket `input_data/` directory
+- **Processing**:
+  - Checks for both bounding_box.geojson and fields.geojson
+  - Compares file ETags and timestamps to detect changes
+  - Stores hash of current file state
+- **Output**: Triggers `ndvi_processing_job` when changes are detected
+- **Schedule**: Runs every 60 seconds
+
+## Data Dependencies
+
+The assets form a directed acyclic graph (DAG) with the following dependencies:
 
 ```
-NDVI = (NIR - RED) / (NIR + RED)
+load_bounding_box ─┐
+                   │
+load_fields ───────┼──> compute_ndvi_raw ──┬──> daily_ndvi_summary
+                   │                       │
+                   │                       ├──> ndvi_anomaly_detector
+                   │                       │
+                   └─────────────────────> └──> ndvi_timeseries_report
 ```
-
-- Healthy vegetation absorbs most visible light and reflects a large portion of near-infrared light, resulting in high NDVI values (0.6 to 0.9)
-- Unhealthy or sparse vegetation reflects more visible light and less near-infrared light, giving moderate NDVI values (0.2 to 0.5)
-- Bare soils and non-vegetated areas have NDVI values close to 0
-- Water bodies have negative NDVI values
 
 ## Project Structure
 
