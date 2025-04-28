@@ -85,42 +85,25 @@ def load_fields(context: AssetExecutionContext) -> gpd.GeoDataFrame:
     min_date = gdf["planting_date"].min().date()
     max_date = gdf["planting_date"].max().date()
     context.log.info(f"[load_fields] Parsed planting dates from {min_date} to {max_date}")
-    
-    # Ensure field_ids are in the correct format for partitioning
-    # Logging original field IDs to diagnose
-    context.log.info(f"[load_fields] Original field IDs: {list(gdf['field_id'])}")
-    
-    # Extract field_ids in the format expected by the partition system
-    # If the fields.geojson has "F001" format, use as is; if numeric, convert appropriately
+
+    # Normalize field_id formats
     field_ids = []
     for fid in gdf["field_id"]:
         if isinstance(fid, (int, float)):
-            # For numeric field IDs, decide on your preferred format
-            # Either: use numeric as is
             field_ids.append(str(int(fid)))
-            # Or: convert to F-prefixed format (uncomment if needed)
-            # field_ids.append(f"F{int(fid):03d}")
         else:
-            # For string field IDs, use as is
             field_ids.append(str(fid))
-    
+
     context.log.info(f"[load_fields] Registering {len(field_ids)} dynamic partitions: {field_ids}")
-    
-    # IMPORTANT: Add partitions with proper error handling
     try:
-        # Clear existing partitions to avoid stale data
-        current_partitions = field_partitions.get_partitions()
-        if current_partitions:
-            context.log.info(f"Removing existing partitions: {current_partitions}")
-            field_partitions.delete_partitions(current_partitions)
-            
-        # Add new partitions
+        current = field_partitions.get_partitions()
+        if current:
+            field_partitions.delete_partitions([p.value for p in current])
         field_partitions.add_partitions(field_ids)
         context.log.info(f"Successfully registered field partitions: {field_ids}")
     except Exception as e:
         context.log.error(f"Error managing partitions: {e}")
-        # Continue execution even if partition management fails
-    
+
     context.log.info("[load_fields] Completed successfully")
     return gdf
 
@@ -130,15 +113,6 @@ def load_fields(context: AssetExecutionContext) -> gpd.GeoDataFrame:
     description="Compute raw NDVI for each (field_id, date) using Sentinel-2 via STAC",
 )
 def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
-    # Add safety checks for partition keys
-    if not context.has_partition_key_for_dimension("field_id"):
-        context.log.error("[compute_ndvi_raw] No field_id partition key available")
-        raise SkipReason("No field_id partition key available")
-    
-    if not context.has_partition_key_for_dimension("date"):
-        context.log.error("[compute_ndvi_raw] No date partition key available")
-        raise SkipReason("No date partition key available")
-    
     field_id = context.partition_key_for_dimension("field_id")
     date_str = context.partition_key_for_dimension("date")
     context.log.info(f"[compute_ndvi_raw] Starting for field={field_id}, date={date_str}")
@@ -149,70 +123,46 @@ def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
     context.log.info(f"[compute_ndvi_raw] Loading fields.geojson from bucket={bucket}")
     obj = s3.get_object(Bucket=bucket, Key="input_data/fields.geojson")
     fields_gdf = gpd.read_file(StringIO(obj["Body"].read().decode()))
-    
-    # More flexible field_id matching to handle different formats
-    # Log the field_id types in the GeoDataFrame to help diagnose issues
-    context.log.info(f"[compute_ndvi_raw] Field IDs in GeoJSON: {list(fields_gdf['field_id'])} (types: {[type(fid).__name__ for fid in fields_gdf['field_id']]}")
-    context.log.info(f"[compute_ndvi_raw] Looking for field_id: {field_id} (type: {type(field_id).__name__})")
-    
-    # Try multiple matching strategies
-    if field_id.isdigit():
-        # If field_id from partition is numeric
-        row = fields_gdf[fields_gdf["field_id"].astype(str) == field_id]
-        if row.empty:
-            # Try as integer
-            try:
-                row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
-            except:
-                pass
+
+    # Match field_id robustly
+    str_ids = fields_gdf["field_id"].astype(str)
+    if field_id in str_ids.values:
+        row = fields_gdf[str_ids == field_id]
     else:
-        # If field_id from partition is already a string with non-numeric chars
-        row = fields_gdf[fields_gdf["field_id"].astype(str) == field_id]
-    
+        try:
+            row = fields_gdf[fields_gdf["field_id"] == int(field_id)]
+        except:
+            row = gpd.GeoDataFrame()
+
     if row.empty:
         context.log.error(f"[compute_ndvi_raw] Field {field_id} not found in GeoJSON")
-        context.log.info(f"[compute_ndvi_raw] Available fields: {list(fields_gdf['field_id'])}")
         raise SkipReason(f"Field {field_id} not found")
-        
+
     geom = row.iloc[0].geometry
     planting_date = row.iloc[0].planting_date
-    context.log.info(f"[compute_ndvi_raw] Field geom bounds: {geom.bounds}")
     if date < planting_date:
-        context.log.info(f"[compute_ndvi_raw] Date {date_str} before planting date {planting_date.date()}, skipping")
         raise SkipReason(f"Skipping {date_str}: before planting date {planting_date.date()}")
 
-    context.log.info(f"[compute_ndvi_raw] Searching STAC for Sentinel-2, cloud_cover<20")
-    search = stac_client.search(
-        collections=["sentinel-s2-l2a"],
-        intersects=mapping(geom),
-        datetime=date_str,
-        query={"eo:cloud_cover": {"lt": 20}},
+    items = list(
+        stac_client.search(
+            collections=["sentinel-s2-l2a"],
+            intersects=mapping(geom),
+            datetime=date_str,
+            query={"eo:cloud_cover": {"lt": 20}},
+        ).get_items()
     )
-    items = list(search.get_items())
-    context.log.info(f"[compute_ndvi_raw] Found {len(items)} STAC items")
     if not items:
-        context.log.warn(f"[compute_ndvi_raw] No items for {field_id} on {date_str}")
         raise SkipReason(f"No Sentinel-2 items for {field_id} on {date_str}")
     item = items[0]
-    context.log.info(f"[compute_ndvi_raw] Using STAC item {item.id}")
 
-    href_red = item.assets["B04"].href
-    href_nir = item.assets["B08"].href
-    context.log.info(f"[compute_ndvi_raw] Reading bands B04, B08 with dask chunks")
-    red = rioxarray.open_rasterio(href_red, masked=True, chunks={"x": 512, "y": 512})[0]
-    nir = rioxarray.open_rasterio(href_nir, masked=True, chunks={"x": 512, "y": 512})[0]
-
-    context.log.info("[compute_ndvi_raw] Clipping bands to field polygon")
+    red = rioxarray.open_rasterio(item.assets["B04"].href, masked=True, chunks={"x":512,"y":512})[0]
+    nir = rioxarray.open_rasterio(item.assets["B08"].href, masked=True, chunks={"x":512,"y":512})[0]
     red_clipped = red.rio.clip([mapping(geom)], crs=red.rio.crs)
     nir_clipped = nir.rio.clip([mapping(geom)], crs=nir.rio.crs)
 
-    context.log.info("[compute_ndvi_raw] Calculating NDVI")
     ndvi = (nir_clipped - red_clipped) / (nir_clipped + red_clipped + 1e-6)
-    context.log.info("[compute_ndvi_raw] Computing mean NDVI")
     mean_val = float(ndvi.mean().compute().item())
-    context.log.info(f"[compute_ndvi_raw] Mean NDVI={mean_val:.3f}")
 
-    context.log.info("[compute_ndvi_raw] Returning NDVI DataArray")
     return Output(
         ndvi,
         metadata={
@@ -230,48 +180,43 @@ def compute_ndvi_raw(context: AssetExecutionContext) -> xr.DataArray:
 )
 def daily_ndvi_summary(context: AssetExecutionContext, compute_ndvi_raw) -> Dict[str, float]:
     date_str = context.partition_key
-    context.log.info(f"[daily_ndvi_summary] Starting summary for date={date_str}")
     summary = {"date": date_str, "average_ndvi": float(np.random.random())}
     key = f"output_data/summary/{date_str}/daily_summary.json"
-    s3 = context.resources.minio.get_s3_client()
-    s3.put_object(Bucket=context.resources.minio.bucket_name, Key=key, Body=json.dumps(summary), ContentType="application/json")
-    context.log.info(f"[daily_ndvi_summary] Saved summary to {key}")
+    context.resources.minio.get_s3_client().put_object(
+        Bucket=context.resources.minio.bucket_name,
+        Key=key,
+        Body=json.dumps(summary),
+        ContentType="application/json",
+    )
     return summary
 
 @asset(
     description="Detect anomalies in NDVI time series and flag low-NDVI fields",
 )
 def ndvi_anomaly_detector(context: AssetExecutionContext, compute_ndvi_raw) -> List[str]:
-    context.log.info("[ndvi_anomaly_detector] Starting anomaly detection")
-    da = compute_ndvi_raw
-    mean_ndvi = float(da.mean().compute().item())
-    context.log.info(f"[ndvi_anomaly_detector] Mean NDVI={mean_ndvi:.3f}")
+    mean_ndvi = float(compute_ndvi_raw.mean().compute().item())
     if mean_ndvi < 0.2:
-        field_id = context.partition_key_for_dimension("field_id") if context.has_partition_key_for_dimension("field_id") else ""
-        date_str = context.partition_key_for_dimension("date") if context.has_partition_key_for_dimension("date") else ""
+        field_id = context.partition_key_for_dimension("field_id")
+        date_str = context.partition_key_for_dimension("date")
         msg = f"Field {field_id} low NDVI {mean_ndvi:.3f} on {date_str}"
-        context.log.warn(f"[ndvi_anomaly_detector] {msg}")
         return [msg]
-    context.log.info("[ndvi_anomaly_detector] No anomalies detected")
     return []
 
 @asset(
     description="Generate NDVI time series CSV for each field",
 )
 def ndvi_timeseries_report(context: AssetExecutionContext, compute_ndvi_raw) -> MetadataValue:
-    # Add safety check for partition key
-    if not context.has_partition_key_for_dimension("field_id"):
-        context.log.error("[ndvi_timeseries_report] No field_id partition key available")
-        raise SkipReason("No field_id partition key available")
-        
     field_id = context.partition_key_for_dimension("field_id")
-    context.log.info(f"[ndvi_timeseries_report] Generating report for field={field_id}")
-    dates = pd.date_range(end=datetime.now(), periods=30)
-    values = np.random.rand(30)
-    df = pd.DataFrame({"date": dates.strftime("%Y-%m-%d"), "ndvi": values})
+    df = pd.DataFrame({
+        "date": pd.date_range(end=datetime.now(), periods=30).strftime("%Y-%m-%d"),
+        "ndvi": np.random.rand(30),
+    })
     csv = df.to_csv(index=False)
     key = f"output_data/timeseries/{field_id}/report.csv"
-    s3 = context.resources.minio.get_s3_client()
-    s3.put_object(Bucket=context.resources.minio.bucket_name, Key=key, Body=csv.encode(), ContentType="text/csv")
-    context.log.info(f"[ndvi_timeseries_report] Saved timeseries to {key}")
+    context.resources.minio.get_s3_client().put_object(
+        Bucket=context.resources.minio.bucket_name,
+        Key=key,
+        Body=csv.encode(),
+        ContentType="text/csv",
+    )
     return MetadataValue.url(f"s3://{context.resources.minio.bucket_name}/{key}")
